@@ -986,3 +986,151 @@ class M73N8H(nn.Module):
         x = torch.sigmoid(x)
         return x
 
+
+class TinyPreNormBlock(nn.Module):
+    def __init__(self, d_model=64, n_heads=4, d_ff=256, dropout=0.1):
+        super().__init__()
+        self.ln1 = nn.LayerNorm(d_model)
+        self.attn = nn.MultiheadAttention(
+            d_model, n_heads, batch_first=True, dropout=dropout
+        )
+        self.ln2 = nn.LayerNorm(d_model)
+        self.ffn = nn.Sequential(
+            nn.Linear(d_model, d_ff),
+            nn.GELU(),
+            nn.Linear(d_ff, d_model),
+        )
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x, key_padding_mask=None):
+        # x: [B, T, D]
+        y, _ = self.attn(self.ln1(x), self.ln1(x), self.ln1(x),
+                         key_padding_mask=key_padding_mask)
+        x = x + self.dropout(y)
+        y = self.ffn(self.ln2(x))
+        x = x + self.dropout(y)
+        return x
+
+
+class TokenAttnDualHead(nn.Module):
+    """
+    Expects:
+      tokens: list of 37 tensors from ReplayGraphStreamer, each [B, D_i]
+      token_mask: [37] or [B, 37] bool (True = padded/dummy to be ignored)
+
+    Token type by index:
+      0–5: player nodes
+       6 : ball node
+       7 : boost node
+       8 : global node
+      9–29: dyn↔dyn edge tokens
+     30–36: dyn↔static edge tokens
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.name = "TokenAttnDualHead"
+
+        self.num_tokens = 37
+        self.token_latent_dim = 64
+
+        # Feature dims are determined by your NODE_INDEX_MAP and edge helpers:
+        player_dim = 32
+        ball_dim = 42
+        boost_dim = 34
+        global_dim = 4
+        dyn_dyn_dim = 18
+        dyn_static_dim = 56
+
+        self.embed_player     = nn.Linear(player_dim,     64)
+        self.embed_ball       = nn.Linear(ball_dim,       64)
+        self.embed_boost      = nn.Linear(boost_dim,      64)
+        self.embed_global     = nn.Linear(global_dim,     64)
+        self.embed_dyn_dyn    = nn.Linear(dyn_dyn_dim,    64)
+        self.embed_dyn_static = nn.Linear(dyn_static_dim, 64)
+
+        self.block1 = TinyPreNormBlock(d_model=64, n_heads=4, d_ff=256, dropout=0.1)
+        self.block2 = TinyPreNormBlock(d_model=64, n_heads=4, d_ff=256, dropout=0.1)
+
+        self.linear1 = nn.Linear(self.num_tokens * 64, 128)
+        self.linear2 = nn.Linear(128, 64)
+        self.head_wsn = nn.Linear(64, 1)
+        self.head_imm = nn.Linear(64, 1)
+
+        self.mixing_param_logit = nn.Parameter(torch.full((1,), 0.5))
+
+    def forward(self, tokens, token_mask=None):
+        """
+        tokens: list length 37, each [B, D_i]
+        token_mask: [37] or [B, 37] bool, True = masked/padded
+        """
+        assert isinstance(tokens, (list, tuple)), "tokens must be a list/tuple of tensors"
+        assert len(tokens) == self.num_tokens, f"Expected {self.num_tokens} tokens, got {len(tokens)}"
+
+        batch_size = tokens[0].size(0)
+
+        embedded = []
+        for idx, t in enumerate(tokens):
+            # t: [B, D_i]
+            if idx <= 5:
+                # player nodes
+                e = self.embed_player(t)
+            elif idx == 6:
+                # ball node
+                e = self.embed_ball(t)
+            elif idx == 7:
+                # boost node
+                e = self.embed_boost(t)
+            elif idx == 8:
+                # global node
+                e = self.embed_global(t)
+            elif 9 <= idx <= 29:
+                # dyn↔dyn edges
+                e = self.embed_dyn_dyn(t)
+            else:  # 30–36
+                # dyn↔static edges
+                e = self.embed_dyn_static(t)
+
+            # shape [B, 64] -> [B, 1, 64]
+            embedded.append(e.unsqueeze(1))
+
+        # [B, 37, 64]
+        x = torch.cat(embedded, dim=1)
+
+        # Prepare key_padding_mask for MultiheadAttention
+        key_padding_mask = None
+        if token_mask is not None:
+            # token_mask coming from MASKS[...] is [37]
+            if token_mask.dim() == 1:
+                key_padding_mask = token_mask.unsqueeze(0).expand(batch_size, -1)
+            else:
+                key_padding_mask = token_mask
+            # MultiheadAttention expects bool with True = ignore
+            key_padding_mask = key_padding_mask.bool()
+
+        x = self.block1(x, key_padding_mask=key_padding_mask)
+        x = self.block2(x, key_padding_mask=key_padding_mask)
+
+        x = x.reshape(batch_size, self.num_tokens * self.token_latent_dim)
+        x = torch.sigmoid(self.linear1(x))
+        x = torch.sigmoid(self.linear2(x))
+
+        wsn_logit = self.head_wsn(x)  # [B, 1]
+        imm_logit = self.head_imm(x)  # [B, 1]
+
+        p_wsn = torch.sigmoid(wsn_logit).squeeze(-1)  # [B]
+        p_imm = torch.sigmoid(imm_logit).squeeze(-1)  # [B]
+
+        return p_wsn, p_imm
+
+
+class TokenAttnDualHeadOnnxWrap(nn.Module):
+    def __init__(self, base):
+        super().__init__()
+        self.base = base
+
+    def forward(self, *args):
+        *tokens, token_mask = args
+        return self.base(list(tokens), token_mask=token_mask)
+
+

@@ -10,7 +10,7 @@ rlt = os.path.join(base, "replayprocessing")
 if os.path.isdir(rlt):
     sys.path.insert(0, rlt)
 from pathlib import Path
-from replay_processing.filetopreds import replay_to_preds
+from replay_processing.replaytopreds import replay_to_preds
 
 def main():
     # Expect: run.py <replay_filepath> <output_csv_filepath>

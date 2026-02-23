@@ -1,6 +1,6 @@
 # -*- mode: python ; coding: utf-8 -*-
 # to create a new exe:
-# pyinstaller neurlcar_applet.spec --noconfirm
+# pyinstaller neurlcar_applet.spec --noconfirm --clean
 
 import os
 from pathlib import Path

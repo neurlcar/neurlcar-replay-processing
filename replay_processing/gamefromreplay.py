@@ -1,4 +1,4 @@
-import carball
+from carball.decompile_replays import decompile_replay
 from carball.json_parser.game import Game
 from .cut_junk_frames_and_tag_who_scores_next import cut_junk_frames_and_tag_who_scores_next
 from .boost import get_boost_collect_tags, append_boost_timer_columns
@@ -14,14 +14,14 @@ import numpy as np
 
 def game_from_replay(replayfilepath):
 
-    '''
+    """
 
-    :param replay: filepath of replay
+    :param replayfilepath: filepath of replay
     :return: modified Game() class
 
-    '''
+    """
 
-    replayjson = carball.decompile_replay(replayfilepath)
+    replayjson = decompile_replay(replayfilepath)
 
     game = Game()
     game.initialize(loaded_json=replayjson)
